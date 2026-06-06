@@ -1,0 +1,16 @@
+# rust build dir
+/target
+
+# configuration
+/.direnv
+/.vscode
+
+# nix build output
+/result
+
+
+# Added by cargo
+#
+# already existing elements were commented out
+
+#/target
