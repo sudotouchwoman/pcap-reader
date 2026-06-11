@@ -1,10 +1,10 @@
 services:
   talker:
-    image: osrf/ros:lyrical-desktop
+    image: &image osrf/ros:lyrical-desktop
     command: ros2 run demo_nodes_cpp talker
 
   listener:
-    image: osrf/ros:lyrical-desktop
+    image: *image
     command: ros2 run demo_nodes_cpp listener
     depends_on:
       - talker

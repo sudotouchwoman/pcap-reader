@@ -72,4 +72,12 @@ mod tests {
 
         assert_eq!(payload_str, "bytez");
     }
+
+    #[test]
+    fn decode_pcap_header() {
+        // the plan:
+        // 1. read the entire header (24 octets, i.e. bytes / u8) into a buffer
+        // 2. parse it into components, test that magic number is correct, deduce endianess
+        // 3. construct a struct from the components
+    }
 }
