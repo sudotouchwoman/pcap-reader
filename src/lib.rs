@@ -1,5 +1,3 @@
-mod pcap;
-
 #[cfg(test)]
 mod tests {
     #[test]
