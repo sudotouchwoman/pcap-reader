@@ -1,3 +1,7 @@
+mod ethernet;
+mod tcpip;
+mod pcap;
+
 #[cfg(test)]
 mod tests {
     #[test]

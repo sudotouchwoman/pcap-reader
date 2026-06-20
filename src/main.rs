@@ -9,6 +9,7 @@ use users::{get_current_uid, get_user_by_uid};
 
 mod ethernet;
 mod pcap;
+mod tcpip;
 
 fn greet(name: &str) -> String {
     format!("Greetings, {}", name)
@@ -41,8 +42,14 @@ fn main() {
                 print!("{frame_count}: {frame} ");
                 frame_count += 1;
 
-                if let Ok(v) = ethernet::ParsedLinkFrame::parse(&frame.packet_data) {
-                    println!("{}", v)
+                if let Ok(v) = ethernet::LinkFrame::parse(&frame.packet_data) {
+                    println!("{}", v);
+
+                    // if let Ok(tcpip::NetworkPacket::Ipv4(v)) =
+                    //     tcpip::NetworkPacket::parse(v.ether_type.into(), v.payload)
+                    // {
+                    //     println!("{}", v);
+                    // }
                 }
             }
             Ok(None) => break,
