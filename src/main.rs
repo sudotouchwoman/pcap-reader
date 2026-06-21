@@ -43,14 +43,14 @@ fn main() {
                 frame_count += 1;
 
                 if let Ok(lf) = ethernet::LinkFrame::parse(&frame.packet_data) {
-                    println!("{}", lf);
+                    print!("{} - ", lf);
 
                     match tcpip::NetworkPacket::parse(lf.ether_type.into(), lf.payload) {
                         Ok(v) => {
-                            println!("\t{}", v);
+                            println!("{}", v);
                         }
                         Err(e) => {
-                            println!("\twhile parsing network packet: {}", e);
+                            println!("while parsing network packet: {}", e);
                         }
                     }
                 }
