@@ -215,7 +215,7 @@ impl fmt::Display for Frame {
 
         write!(
             f,
-            "Frame[{}, captured={}, original={}]",
+            "[{}, captured={}, original={}]",
             offset.to_utc().to_string(),
             self.captured_len,
             self.original_len,

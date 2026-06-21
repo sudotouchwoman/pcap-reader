@@ -39,17 +39,20 @@ fn main() {
         match pcap_reader.next_frame() {
             Ok(Some(frame)) => {
                 // process frame
-                print!("{frame_count}: {frame} ");
+                print!("{frame_count}:{frame}: ");
                 frame_count += 1;
 
-                if let Ok(v) = ethernet::LinkFrame::parse(&frame.packet_data) {
-                    println!("{}", v);
+                if let Ok(lf) = ethernet::LinkFrame::parse(&frame.packet_data) {
+                    println!("{}", lf);
 
-                    // if let Ok(tcpip::NetworkPacket::Ipv4(v)) =
-                    //     tcpip::NetworkPacket::parse(v.ether_type.into(), v.payload)
-                    // {
-                    //     println!("{}", v);
-                    // }
+                    match tcpip::NetworkPacket::parse(lf.ether_type.into(), lf.payload) {
+                        Ok(v) => {
+                            println!("\t{}", v);
+                        }
+                        Err(e) => {
+                            println!("\twhile parsing network packet: {}", e);
+                        }
+                    }
                 }
             }
             Ok(None) => break,
