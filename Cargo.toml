@@ -7,3 +7,4 @@ edition = "2024"
 thiserror = "2.0.18"
 users = "0.11"
 time = { version = "0.3", features = ["formatting", "local-offset"] }
+lru = "0.18.1"

@@ -31,6 +31,8 @@ fn main() {
     let f = fs::File::open(config.pcap_filename).unwrap_or_else(display_and_exit);
     let mut pcap_reader = pcap::PcapReader::new(f).unwrap_or_else(display_and_exit);
 
+    let mut reasm = tcpip::NetworkReassembler::default();
+
     println!("parsed header: {:?}", pcap_reader.header());
 
     let mut frame_count = 0 as usize;
@@ -45,10 +47,15 @@ fn main() {
                 if let Ok(lf) = ethernet::LinkFrame::parse(&frame.packet_data) {
                     print!("{} - ", lf);
 
-                    match tcpip::NetworkPacket::parse(lf.ether_type.into(), lf.payload) {
-                        Ok(v) => {
-                            println!("{}", v);
-                        }
+                    use tcpip::ReassemblyResult::{Incomplete, NopIp, Ready, Rejected};
+
+                    match tcpip::NetworkPacket::parse(lf.ether_type, lf.payload) {
+                        Ok(pkt) => match reasm.process(&pkt) {
+                            Ready(d) => println!("ready: {d}"),
+                            Incomplete => println!("fragment buffered"),
+                            Rejected(e) => println!("reject fragment: {}", e),
+                            NopIp => println!("non-ip: {}", pkt),
+                        },
                         Err(e) => {
                             println!("while parsing network packet: {}", e);
                         }
