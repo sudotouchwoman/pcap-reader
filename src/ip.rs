@@ -50,6 +50,11 @@ pub struct NetworkReassembler {
     v6: frag::DatagramReassembler<v6::Addr>,
 }
 
+pub enum IpPacket<'a> {
+    Ipv4(v4::Packet<'a>),
+    Ipv6(v6::Packet<'a>),
+}
+
 /// Light facade for DataframReassembler that produces proto-agnostic ReassemblyResult
 impl NetworkReassembler {
     pub fn with_reassemblers(
@@ -59,11 +64,10 @@ impl NetworkReassembler {
         Self { v4, v6 }
     }
 
-    pub fn process(&mut self, packet: &NetworkPacket<'_>) -> ReassemblyResult {
+    pub fn process(&mut self, packet: &IpPacket<'_>) -> ReassemblyResult {
         match packet {
-            NetworkPacket::Ipv4(p) => self.map_v4(p),
-            NetworkPacket::Ipv6(p) => self.map_v6(p),
-            NetworkPacket::Arp(_) => ReassemblyResult::NopIp,
+            IpPacket::Ipv4(p) => self.map_v4(p),
+            IpPacket::Ipv6(p) => self.map_v6(p),
         }
     }
 
@@ -103,7 +107,7 @@ pub enum ReassemblyResult {
     Ready(Reassembled),
     Incomplete,
     Rejected(frag::Error),
-    NopIp,
+    NotIp,
 }
 
 pub enum Reassembled {
@@ -175,7 +179,7 @@ mod ip {
 
 pub mod v4 {
     use super::{Error, Parse, frag, ip};
-    use crate::{ethernet::HexSlice, tcpip::frag::Fragmentable};
+    use crate::{ethernet::HexSlice, ip::frag::Fragmentable};
     use std::fmt;
 
     // 32 bits, or 4 bytes
@@ -215,8 +219,8 @@ pub mod v4 {
     pub struct Headers<'a> {
         identification: u16,
         flags_and_fragment_offset: u16,
-        header_checksum: u16,
-        options: &'a [u8],
+        _header_checksum: u16,
+        _options: &'a [u8],
     }
 
     impl<'a> Parse<'a> for Packet<'a> {
@@ -285,8 +289,8 @@ pub mod v4 {
                 headers: Headers {
                     identification,
                     flags_and_fragment_offset,
-                    header_checksum,
-                    options: ipv4_options,
+                    _header_checksum: header_checksum,
+                    _options: ipv4_options,
                 },
                 payload: ipv4_payload,
             })
@@ -358,7 +362,7 @@ pub mod v4 {
 
 pub mod v6 {
     use super::{Error, Parse, frag, ip};
-    use crate::{ethernet::HexSlice, tcpip::frag::Fragmentable};
+    use crate::{ethernet::HexSlice, ip::frag::Fragmentable};
     use std::fmt;
 
     // 32 bits, or 4 bytes
@@ -651,7 +655,7 @@ pub mod v6 {
     }
 }
 
-mod arp {
+pub mod arp {
     use super::{Error, Parse, v4};
     use crate::ethernet::{EtherType, MacAddress};
     use std::fmt;
@@ -831,13 +835,21 @@ pub mod frag {
     type Offset = u16;
     type Payload = Vec<u8>;
 
-    #[derive(Default)]
     pub struct DatagramReassemblyBuffer {
         fragments: BTreeMap<Offset, Payload>,
         total_len: Option<usize>,
+        max_fragments: NonZeroUsize,
     }
 
     impl DatagramReassemblyBuffer {
+        pub fn new(max_fragments: NonZeroUsize) -> Self {
+            Self {
+                fragments: BTreeMap::default(),
+                total_len: None,
+                max_fragments,
+            }
+        }
+
         pub fn insert(&mut self, info: FragmentInfo, payload: &[u8]) -> Result<(), Error> {
             if info.has_more && payload.len() % 8 != 0 {
                 return Err(Error::UnalignedPayload(payload.len()));
@@ -853,6 +865,11 @@ pub mod frag {
             }
 
             self.fragments.insert(offset_octets, payload.to_vec());
+
+            // handle fragment buffer overflow
+            if self.fragments.len() > self.max_fragments.get() {
+                return Err(Error::TooManyFragments(self.fragments.len()));
+            }
 
             if !info.has_more {
                 // this is the last fragment thus we know the total length
@@ -958,9 +975,9 @@ pub mod frag {
                 });
             };
 
-            let buffer = self
-                .buffers
-                .get_or_insert_mut(key.clone(), DatagramReassemblyBuffer::default);
+            let buffer = self.buffers.get_or_insert_mut(key.clone(), || {
+                DatagramReassemblyBuffer::new(self.max_fragments_per_buffer)
+            });
 
             if let Err(v) = buffer.insert(info, packet.payload()) {
                 return ReassemblyResult::Rejected(v);

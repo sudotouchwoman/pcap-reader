@@ -7,9 +7,7 @@ use std::{
 use thiserror::Error;
 use users::{get_current_uid, get_user_by_uid};
 
-mod ethernet;
-mod pcap;
-mod tcpip;
+use ros_flake::{event, pcap};
 
 fn greet(name: &str) -> String {
     format!("Greetings, {}", name)
@@ -31,7 +29,7 @@ fn main() {
     let f = fs::File::open(config.pcap_filename).unwrap_or_else(display_and_exit);
     let mut pcap_reader = pcap::PcapReader::new(f).unwrap_or_else(display_and_exit);
 
-    let mut reasm = tcpip::NetworkReassembler::default();
+    let mut decoder = event::Decoder::new();
 
     println!("parsed header: {:?}", pcap_reader.header());
 
@@ -41,25 +39,11 @@ fn main() {
         match pcap_reader.next_frame() {
             Ok(Some(frame)) => {
                 // process frame
-                print!("{frame_count}:{frame}: ");
+                println!("{frame_count}:{frame}:");
                 frame_count += 1;
 
-                if let Ok(lf) = ethernet::LinkFrame::parse(&frame.packet_data) {
-                    print!("{} - ", lf);
-
-                    use tcpip::ReassemblyResult::{Incomplete, NopIp, Ready, Rejected};
-
-                    match tcpip::NetworkPacket::parse(lf.ether_type, lf.payload) {
-                        Ok(pkt) => match reasm.process(&pkt) {
-                            Ready(d) => println!("ready: {d}"),
-                            Incomplete => println!("fragment buffered"),
-                            Rejected(e) => println!("reject fragment: {}", e),
-                            NopIp => println!("non-ip: {}", pkt),
-                        },
-                        Err(e) => {
-                            println!("while parsing network packet: {}", e);
-                        }
-                    }
+                for event in decoder.push_frame(&frame.packet_data) {
+                    println!("{event}")
                 }
             }
             Ok(None) => break,

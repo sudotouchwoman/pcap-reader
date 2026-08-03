@@ -1,9 +1,12 @@
-mod ethernet;
-mod tcpip;
-mod pcap;
+pub mod ethernet;
+pub mod event;
+pub mod ip;
+pub mod pcap;
 
 #[cfg(test)]
 mod tests {
+    use std::cmp::min;
+
     #[test]
     fn decode_binary_sequence() {
         const BYTES: [u8; 4] = [0x12, 0x34, 0x56, 0x78];
