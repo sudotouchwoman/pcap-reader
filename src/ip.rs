@@ -1,5 +1,6 @@
-use crate::ethernet::EtherType;
-use std::fmt::{self, Display};
+use crate::{ethernet::EtherType, transport};
+
+use std::fmt;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -16,6 +17,98 @@ pub enum Error {
     MalformedArpPacket,
     #[error("unknown ether type: {0:x}")]
     UnknownEtherType(u16),
+}
+
+// Addr trait to make transport layer types generic over ip protocol
+// uses a private module that only implements Sealed trait to v4/v6 addrs
+pub trait Addr: private::SealedAddr {}
+
+impl Addr for v4::Addr {}
+impl Addr for v6::Addr {}
+
+// GAT (Generic Associated Types) Pattern for ip families:
+// at first, separate v4::Packet and v6::Packet types were used,
+// but packing and unpacking v4/v6 variants over and over in enums
+// with match arms became tedious so a Version trait, implemented for v4 and v6
+// was finally defined
+pub trait Version: private::SealedVersion {
+    type Addr: Addr;
+    type Headers<'a>;
+}
+
+mod private {
+    use super::{v4, v6};
+    use std::{fmt, hash};
+
+    pub trait SealedAddr: hash::Hash + Eq + Copy + Clone + fmt::Debug + fmt::Display {}
+
+    impl SealedAddr for v4::Addr {}
+    impl SealedAddr for v6::Addr {}
+
+    pub trait SealedVersion {}
+
+    impl SealedVersion for v4::Version {}
+    impl SealedVersion for v6::Version {}
+}
+
+pub mod markers {
+    use std::fmt;
+
+    use super::{Packet, Version, frag, v4, v6};
+
+    // A "type constructor" encoded as a trait with a GAT
+    pub trait Constructor {
+        type Apply<'a, V: Version>;
+    }
+
+    pub enum Family<'a, C: Constructor> {
+        Ipv4(C::Apply<'a, v4::Version>),
+        Ipv6(C::Apply<'a, v6::Version>),
+    }
+
+    // generic Display implementation to reduce boilerplate match expressions
+    impl<'a, C: Constructor> fmt::Display for Family<'a, C>
+    where
+        C::Apply<'a, v4::Version>: fmt::Display,
+        C::Apply<'a, v6::Version>: fmt::Display,
+    {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                Family::Ipv4(v) => v.fmt(f),
+                Family::Ipv6(v) => v.fmt(f),
+            }
+        }
+    }
+
+    pub struct PacketCtor;
+    impl Constructor for PacketCtor {
+        type Apply<'a, V: Version> = Packet<'a, V>;
+    }
+
+    pub struct DatagramCtor;
+    impl Constructor for DatagramCtor {
+        type Apply<'a, V: Version> = frag::Datagram<V>;
+    }
+}
+
+// Version-agnostic IP packet using GAT pattern
+pub struct Packet<'a, V: Version> {
+    pub src: V::Addr,
+    pub dst: V::Addr,
+    pub next_protocol: Proto,
+    pub headers: V::Headers<'a>,
+    pub payload: &'a [u8],
+    ttl: u8,
+}
+
+trait Parse<'a>
+where
+    // returning Result requires both of its arguments to have
+    // a known fixed size at compile-time, hence the trait bound
+    Self: Sized,
+{
+    type Error;
+    fn from_bytes(payload: &'a [u8]) -> Result<Self, Self::Error>;
 }
 
 pub enum NetworkPacket<'a> {
@@ -46,54 +139,50 @@ impl<'a> fmt::Display for NetworkPacket<'a> {
 }
 
 pub struct NetworkReassembler {
-    v4: frag::DatagramReassembler<v4::Addr>,
-    v6: frag::DatagramReassembler<v6::Addr>,
+    v4: frag::DatagramReassembler<v4::Version>,
+    v6: frag::DatagramReassembler<v6::Version>,
 }
 
-pub enum IpPacket<'a> {
-    Ipv4(v4::Packet<'a>),
-    Ipv6(v6::Packet<'a>),
-}
+pub type IpPacket<'a> = markers::Family<'a, markers::PacketCtor>;
 
 /// Light facade for DataframReassembler that produces proto-agnostic ReassemblyResult
 impl NetworkReassembler {
     pub fn with_reassemblers(
-        v4: frag::DatagramReassembler<v4::Addr>,
-        v6: frag::DatagramReassembler<v6::Addr>,
+        v4: frag::DatagramReassembler<v4::Version>,
+        v6: frag::DatagramReassembler<v6::Version>,
     ) -> Self {
         Self { v4, v6 }
     }
 
     pub fn process(&mut self, packet: &IpPacket<'_>) -> ReassemblyResult {
+        use markers::Family;
+
         match packet {
-            IpPacket::Ipv4(p) => self.map_v4(p),
-            IpPacket::Ipv6(p) => self.map_v6(p),
+            Family::Ipv4(p) => Self::map(p, &mut self.v4, Family::Ipv4),
+            Family::Ipv6(p) => Self::map(p, &mut self.v6, Family::Ipv6),
         }
     }
 
-    fn map_v4(&mut self, p: &v4::Packet<'_>) -> ReassemblyResult {
-        match self.v4.process(p) {
-            frag::ReassemblyResult::Complete(datagram)
-            | frag::ReassemblyResult::NotFragmented(datagram) => {
-                ReassemblyResult::Ready(Reassembled::IPv4(datagram))
+    fn map<V: Version>(
+        packet: &Packet<'_, V>,
+        reassembler: &mut frag::DatagramReassembler<V>,
+        convert: impl FnOnce(frag::Datagram<V>) -> Reassembled,
+    ) -> ReassemblyResult
+    // fragmentable is only implemented for the concrete aliases (v4::Packer, v6::Packer),
+    // not for arbitrary V: Version. In a generic map, V: Version alone does not imply that bound
+    // fix: add the missing bound on map
+    where
+        for<'a> Packet<'a, V>: frag::Fragmentable<V>,
+    {
+        match reassembler.process(packet) {
+            frag::ReassemblyResult::Complete(d) | frag::ReassemblyResult::NotFragmented(d) => {
+                ReassemblyResult::Ready(convert(d))
             }
             frag::ReassemblyResult::Incomplete => ReassemblyResult::Incomplete,
-            frag::ReassemblyResult::Rejected(error) => ReassemblyResult::Rejected(error),
-        }
-    }
-
-    fn map_v6(&mut self, p: &v6::Packet<'_>) -> ReassemblyResult {
-        match self.v6.process(p) {
-            frag::ReassemblyResult::Complete(datagram)
-            | frag::ReassemblyResult::NotFragmented(datagram) => {
-                ReassemblyResult::Ready(Reassembled::IPv6(datagram))
-            }
-            frag::ReassemblyResult::Incomplete => ReassemblyResult::Incomplete,
-            frag::ReassemblyResult::Rejected(error) => ReassemblyResult::Rejected(error),
+            frag::ReassemblyResult::Rejected(e) => ReassemblyResult::Rejected(e),
         }
     }
 }
-
 impl Default for NetworkReassembler {
     fn default() -> Self {
         Self::with_reassemblers(
@@ -110,30 +199,25 @@ pub enum ReassemblyResult {
     NotIp,
 }
 
-pub enum Reassembled {
-    IPv4(frag::Datagram<v4::Addr>),
-    IPv6(frag::Datagram<v6::Addr>),
-}
+// 'static is a placeholder: DatagramCtorMarker::Apply ignores the lifetime.
+pub type Reassembled = markers::Family<'static, markers::DatagramCtor>;
 
-impl Display for Reassembled {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Reassembled {
+    pub fn parse_transport(self) -> Result<transport::Packet, transport::Error> {
         match self {
-            Self::IPv4(datagram) => write!(f, "{}", datagram),
-            Self::IPv6(datagram) => write!(f, "{}", datagram),
+            markers::Family::Ipv4(v) => {
+                transport::Segment::parse(v.id.next_protocol, v.id.src, v.id.dst, v.payload)
+                    .map(markers::Family::Ipv4)
+            }
+            markers::Family::Ipv6(v) => {
+                transport::Segment::parse(v.id.next_protocol, v.id.src, v.id.dst, v.payload)
+                    .map(markers::Family::Ipv6)
+            }
         }
     }
 }
 
-trait Parse<'a>
-where
-    // returning Result requires both of its arguments to have
-    // a known fixed size at compile-time, hence the trait bound
-    Self: Sized,
-{
-    fn from_bytes(payload: &'a [u8]) -> Result<Self, Error>;
-}
-
-mod ip {
+mod proto {
     // consts in a separate module to reference both in IpProtocol enum and scan_for_fragment fn,
     // since both share the same namespace of ipv6 headers;
     pub const NH_HOP_BY_HOP: u8 = 0;
@@ -149,38 +233,44 @@ mod ip {
     pub const NH_ICMP_V6: u8 = 58;
     pub const NH_NO_NEXT: u8 = 59;
     pub const NH_DEST_OPTS: u8 = 60;
+}
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-    #[repr(u8)]
-    pub enum Proto {
-        ICMPv4 = NH_ICMP_V4,
-        IGMP = NH_IGMP,
-        TCP = NH_TCP,
-        UDP = NH_UDP,
-        ENCAP = V6_IN_V4_ENCAP,
-        ICMPv6 = NH_ICMP_V6,
-        Unknown(u8),
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum Proto {
+    ICMPv4 = proto::NH_ICMP_V4,
+    IGMP = proto::NH_IGMP,
+    TCP = proto::NH_TCP,
+    UDP = proto::NH_UDP,
+    ENCAP = proto::V6_IN_V4_ENCAP,
+    ICMPv6 = proto::NH_ICMP_V6,
+    Unknown(u8),
+}
 
-    impl From<u8> for Proto {
-        fn from(v: u8) -> Self {
-            match v {
-                NH_ICMP_V4 => Self::ICMPv4,
-                NH_IGMP => Self::IGMP,
-                NH_TCP => Self::TCP,
-                NH_UDP => Self::UDP,
-                V6_IN_V4_ENCAP => Self::ENCAP,
-                NH_ICMP_V6 => Self::ICMPv6,
-                v => Self::Unknown(v),
-            }
+impl From<u8> for Proto {
+    fn from(v: u8) -> Self {
+        match v {
+            proto::NH_ICMP_V4 => Self::ICMPv4,
+            proto::NH_IGMP => Self::IGMP,
+            proto::NH_TCP => Self::TCP,
+            proto::NH_UDP => Self::UDP,
+            proto::V6_IN_V4_ENCAP => Self::ENCAP,
+            proto::NH_ICMP_V6 => Self::ICMPv6,
+            v => Self::Unknown(v),
         }
     }
 }
 
 pub mod v4 {
-    use super::{Error, Parse, frag, ip};
-    use crate::{ethernet::HexSlice, ip::frag::Fragmentable};
+    use super::{Error, Parse, Proto, frag, frag::Fragmentable};
     use std::fmt;
+
+    pub struct Version;
+
+    impl super::Version for Version {
+        type Addr = Addr;
+        type Headers<'a> = Headers<'a>;
+    }
 
     // 32 bits, or 4 bytes
     const ADDRESS_SIZE: usize = 32 / 8;
@@ -207,14 +297,7 @@ pub mod v4 {
         }
     }
 
-    pub struct Packet<'a> {
-        pub src: Addr,
-        pub dst: Addr,
-        pub next_protocol: ip::Proto,
-        pub headers: Headers<'a>,
-        pub payload: &'a [u8],
-        ttl: u8,
-    }
+    pub type Packet<'a> = super::Packet<'a, Version>;
 
     pub struct Headers<'a> {
         identification: u16,
@@ -224,7 +307,9 @@ pub mod v4 {
     }
 
     impl<'a> Parse<'a> for Packet<'a> {
-        fn from_bytes(payload: &'a [u8]) -> Result<Self, Error> {
+        type Error = Error;
+
+        fn from_bytes(payload: &'a [u8]) -> Result<Self, Self::Error> {
             const MIN_IPV4_HEADER_BYTES: usize = 20;
 
             let packet_len = payload.len();
@@ -299,6 +384,8 @@ pub mod v4 {
 
     impl<'a> fmt::Display for Packet<'a> {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            use crate::slices::Hex;
+
             write!(
                 f,
                 "IPv4[{} -> {}] ttl: {}, proto: {:?}, fragmented: {}, payload_len: {}, payload: {}",
@@ -308,15 +395,13 @@ pub mod v4 {
                 self.next_protocol,
                 self.is_fragmented(),
                 self.payload.len(),
-                HexSlice(self.payload),
+                Hex(self.payload),
             )
         }
     }
 
-    impl<'a> frag::Fragmentable for Packet<'a> {
-        type Addr = Addr;
-
-        fn fragment_key(&self) -> Option<(frag::FragmentKey<Self::Addr>, frag::FragmentInfo)> {
+    impl<'a> frag::Fragmentable<Version> for Packet<'a> {
+        fn fragment_key(&self) -> Option<(frag::FragmentKey<Addr>, frag::FragmentInfo)> {
             // only return a key if this packet is actually fragmented
             let flags = self.headers.flags_and_fragment_offset;
 
@@ -346,24 +431,31 @@ pub mod v4 {
             self.payload
         }
 
-        fn src(&self) -> Self::Addr {
+        fn src(&self) -> Addr {
             self.src
         }
 
-        fn dst(&self) -> Self::Addr {
+        fn dst(&self) -> Addr {
             self.dst
         }
 
-        fn next_protocol(&self) -> ip::Proto {
+        fn next_protocol(&self) -> Proto {
             self.next_protocol
         }
     }
 }
 
 pub mod v6 {
-    use super::{Error, Parse, frag, ip};
-    use crate::{ethernet::HexSlice, ip::frag::Fragmentable};
+    use super::{Error, Parse, Proto, frag};
+    use crate::{ip::frag::Fragmentable, slices::Hex};
     use std::fmt;
+
+    pub struct Version;
+
+    impl super::Version for Version {
+        type Addr = Addr;
+        type Headers<'a> = Option<FragmentationMetadata>;
+    }
 
     // 32 bits, or 4 bytes
     const ADDRESS_SIZE: usize = 128 / 8;
@@ -391,16 +483,12 @@ pub mod v6 {
         }
     }
 
-    pub struct Packet<'a> {
-        pub src: Addr,
-        pub dst: Addr,
-        pub next_protocol: ip::Proto,
-        pub payload: &'a [u8],
-        pub fragmentation_metadata: Option<FragmentationMetadata>,
-    }
+    pub type Packet<'a> = super::Packet<'a, Version>;
 
     impl<'a> Parse<'a> for Packet<'a> {
-        fn from_bytes(payload: &'a [u8]) -> Result<Self, Error> {
+        type Error = Error;
+
+        fn from_bytes(payload: &'a [u8]) -> Result<Self, Self::Error> {
             const IPV6_HEADER_BYTES: usize = 40;
 
             let packet_len = payload.len();
@@ -443,7 +531,8 @@ pub mod v6 {
                 dst,
                 next_protocol: scan.next_protocol,
                 payload: ipv6_payload,
-                fragmentation_metadata: scan.metadata,
+                headers: scan.metadata,
+                ttl: 0,
             })
         }
     }
@@ -458,7 +547,7 @@ pub mod v6 {
                 self.next_protocol,
                 self.is_fragmented(),
                 self.payload.len(),
-                HexSlice(self.payload),
+                Hex(self.payload),
             )
         }
     }
@@ -477,7 +566,7 @@ pub mod v6 {
     const FRAGMENT_HEADER_LEN_BYTES: usize = 8;
 
     struct ExtensionScan {
-        next_protocol: ip::Proto,
+        next_protocol: Proto,
         metadata: Option<FragmentationMetadata>,
         payload_start: usize,
     }
@@ -487,9 +576,11 @@ pub mod v6 {
         mut next_header: u8,
         mut offset: usize,
     ) -> Result<ExtensionScan, Error> {
+        use super::proto;
+
         loop {
             match next_header {
-                ip::NH_FRAGMENT => {
+                proto::NH_FRAGMENT => {
                     // handle fragmentation header: parse, return fragmented state
                     let header = parse_fragment_header(
                         payload
@@ -509,25 +600,25 @@ pub mod v6 {
                         payload_start: offset + FRAGMENT_HEADER_LEN_BYTES,
                     });
                 }
-                ip::NH_HOP_BY_HOP | ip::NH_ROUTING | ip::NH_DEST_OPTS => {
+                proto::NH_HOP_BY_HOP | proto::NH_ROUTING | proto::NH_DEST_OPTS => {
                     // skip without interpreting header contents (out of scope for now)
                     // and continue to the next iteration
                     next_header = payload[offset];
                     offset = skip_hdr_ext_len_header(payload, offset)?;
                 }
-                ip::NH_AH => {
+                proto::NH_AH => {
                     // authorization header - has to be skipped in a slightly different way
                     // then continue to the next iteration
                     next_header = payload[offset];
                     offset = skip_ah(payload, offset)?;
                 }
-                ip::NH_ICMP_V4
-                | ip::NH_IGMP
-                | ip::NH_TCP
-                | ip::NH_UDP
-                | ip::NH_ICMP_V6
-                | ip::NH_ESP
-                | ip::NH_NO_NEXT => {
+                proto::NH_ICMP_V4
+                | proto::NH_IGMP
+                | proto::NH_TCP
+                | proto::NH_UDP
+                | proto::NH_ICMP_V6
+                | proto::NH_ESP
+                | proto::NH_NO_NEXT => {
                     // explicit return on known next header values
                     return Ok(ExtensionScan {
                         metadata: None,
@@ -590,7 +681,7 @@ pub mod v6 {
     }
 
     struct RawFragmentHeader {
-        next_protocol: ip::Proto,
+        next_protocol: Proto,
         fragment_offset_octets: u16, // 13-bit value
         more_fragments: bool,
         identification: u32,
@@ -614,11 +705,9 @@ pub mod v6 {
         })
     }
 
-    impl<'a> frag::Fragmentable for Packet<'a> {
-        type Addr = Addr;
-
-        fn fragment_key(&self) -> Option<(frag::FragmentKey<Self::Addr>, frag::FragmentInfo)> {
-            match self.fragmentation_metadata {
+    impl<'a> frag::Fragmentable<Version> for Packet<'a> {
+        fn fragment_key(&self) -> Option<(frag::FragmentKey<Addr>, frag::FragmentInfo)> {
+            match self.headers {
                 None => None,
                 Some(v) => Some((
                     frag::FragmentKey {
@@ -634,22 +723,22 @@ pub mod v6 {
         }
 
         fn is_fragmented(&self) -> bool {
-            self.fragmentation_metadata.is_some()
+            self.headers.is_some()
         }
 
         fn payload(&self) -> &[u8] {
             self.payload
         }
 
-        fn src(&self) -> Self::Addr {
+        fn src(&self) -> Addr {
             self.src
         }
 
-        fn dst(&self) -> Self::Addr {
+        fn dst(&self) -> Addr {
             self.dst
         }
 
-        fn next_protocol(&self) -> ip::Proto {
+        fn next_protocol(&self) -> Proto {
             self.next_protocol
         }
     }
@@ -667,7 +756,9 @@ pub mod arp {
     }
 
     impl<'a> Parse<'a> for Packet {
-        fn from_bytes(payload: &'a [u8]) -> Result<Self, Error> {
+        type Error = Error;
+
+        fn from_bytes(payload: &'a [u8]) -> Result<Self, Self::Error> {
             // NOTE: generally arp may be used for different internet and link level protocols
             // rather than ipv4 + ethernet, but for the sake of simplicity, only this combination
             // is considered in this implementation for simplicity;
@@ -766,9 +857,9 @@ pub mod arp {
 }
 
 pub mod frag {
-    use crate::ethernet::HexSlice;
+    use super::Proto;
+    use crate::{ip, slices};
 
-    use super::ip;
     use std::{
         collections::BTreeMap,
         fmt::{self, Display},
@@ -791,21 +882,19 @@ pub mod frag {
         TooManyFragments(usize),
     }
     // Fragmentable defines interface for fragment reassembly
-    pub trait Fragmentable {
-        type Addr;
-
-        fn fragment_key(&self) -> Option<(FragmentKey<Self::Addr>, FragmentInfo)>;
+    pub trait Fragmentable<V: ip::Version> {
+        fn fragment_key(&self) -> Option<(FragmentKey<V::Addr>, FragmentInfo)>;
 
         fn is_fragmented(&self) -> bool {
             self.fragment_key().is_some()
         }
 
         fn payload(&self) -> &[u8];
-        fn src(&self) -> Self::Addr;
-        fn dst(&self) -> Self::Addr;
-        fn next_protocol(&self) -> ip::Proto;
+        fn src(&self) -> V::Addr;
+        fn dst(&self) -> V::Addr;
+        fn next_protocol(&self) -> Proto;
 
-        fn datagram_id(&self) -> DatagramId<Self::Addr> {
+        fn datagram_id(&self) -> DatagramId<V::Addr> {
             DatagramId {
                 src: self.src(),
                 dst: self.dst(),
@@ -815,14 +904,14 @@ pub mod frag {
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-    pub struct DatagramId<A> {
+    pub struct DatagramId<A: ip::Addr> {
         pub src: A,
         pub dst: A,
-        pub next_protocol: ip::Proto,
+        pub next_protocol: Proto,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-    pub struct FragmentKey<A> {
+    pub struct FragmentKey<A: ip::Addr> {
         pub datagram: DatagramId<A>,
         pub identification: u32,
     }
@@ -945,18 +1034,18 @@ pub mod frag {
         }
     }
 
-    pub struct DatagramReassembler<A> {
-        buffers: LruCache<FragmentKey<A>, DatagramReassemblyBuffer>,
+    pub struct DatagramReassembler<V: ip::Version> {
+        buffers: LruCache<FragmentKey<V::Addr>, DatagramReassemblyBuffer>,
         max_fragments_per_buffer: NonZeroUsize,
     }
 
-    impl<A: Hash + Eq + Clone + Display> Default for DatagramReassembler<A> {
+    impl<V: ip::Version> Default for DatagramReassembler<V> {
         fn default() -> Self {
             Self::with_policy(DatagramReassemblyPolicy::default())
         }
     }
 
-    impl<A: Hash + Eq + Clone + Display> DatagramReassembler<A> {
+    impl<V: ip::Version> DatagramReassembler<V> {
         pub fn with_policy(policy: DatagramReassemblyPolicy) -> Self {
             Self {
                 buffers: LruCache::new(policy.max_buffers),
@@ -964,9 +1053,9 @@ pub mod frag {
             }
         }
 
-        pub fn process<F>(&mut self, packet: &F) -> ReassemblyResult<A>
+        pub fn process<F>(&mut self, packet: &F) -> ReassemblyResult<V>
         where
-            F: Fragmentable<Addr = A>,
+            F: Fragmentable<V>,
         {
             let Some((key, info)) = packet.fragment_key() else {
                 return ReassemblyResult::NotFragmented(Datagram {
@@ -997,12 +1086,12 @@ pub mod frag {
     }
 
     #[derive(Debug)]
-    pub struct Datagram<A: Display> {
-        pub id: DatagramId<A>,
+    pub struct Datagram<V: ip::Version> {
+        pub id: DatagramId<V::Addr>,
         pub payload: Payload,
     }
 
-    impl<A: Display> Display for Datagram<A> {
+    impl<A: ip::Version> Display for Datagram<A> {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             write!(
                 f,
@@ -1011,18 +1100,18 @@ pub mod frag {
                 self.id.dst,
                 self.id.next_protocol,
                 self.payload.len(),
-                HexSlice(self.payload.as_slice()),
+                slices::Hex(self.payload.as_slice()),
             )
         }
     }
 
-    pub enum ReassemblyResult<A: Display> {
+    pub enum ReassemblyResult<V: ip::Version> {
         /// A complete datagram was reassembled
-        Complete(Datagram<A>),
+        Complete(Datagram<V>),
         /// Fragments were accepted but reassembly is incomplete
         Incomplete,
         /// This packet was not fragmented; pass it through
-        NotFragmented(Datagram<A>),
+        NotFragmented(Datagram<V>),
         /// Rejected due to invalid fragment or duplicate
         Rejected(Error),
     }

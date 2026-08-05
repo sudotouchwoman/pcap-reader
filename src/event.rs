@@ -1,4 +1,4 @@
-use crate::{ethernet, ip};
+use crate::{ethernet, ip, transport};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -9,6 +9,8 @@ pub enum Error {
     Network(ip::Error),
     #[error("non-IP packet passed to reassembler")]
     UnexpectedNotIp,
+    #[error("{0}")]
+    Transport(#[from] transport::Error),
 }
 
 pub enum Event<'a> {
@@ -23,6 +25,9 @@ pub enum Event<'a> {
     ReassemblyIncomplete,
     ReassemblyRejected(ip::frag::Error),
 
+    // transport-level events (tcp/udp segments / icmp messages)
+    Transport(transport::Packet),
+
     // link- or network-level error
     Error(Error),
 }
@@ -32,11 +37,12 @@ use std::fmt;
 impl<'a> fmt::Display for Event<'a> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Event::Ethernet(link) => write!(f, "Ethernet: {link}"),
-            Event::Arp(arp) => write!(f, "ARP: {arp}"),
+            Event::Ethernet(link) => write!(f, "{link}"),
+            Event::Arp(arp) => write!(f, "{arp}"),
             Event::Reassembled(d) => write!(f, "Reassembled: {d}"),
             Event::ReassemblyIncomplete => write!(f, "Reassembly: incomplete"),
             Event::ReassemblyRejected(e) => write!(f, "Reassembly: rejected ({e})"),
+            Event::Transport(v) => write!(f, "{v}"),
             Event::Error(e) => write!(f, "Error: {e}"),
         }
     }
@@ -82,10 +88,25 @@ impl Decoder {
 
     pub fn handle_ip_packet<'a>(&mut self, events: &mut Vec<Event<'a>>, pkt: ip::IpPacket<'a>) {
         match self.reassembler.process(&pkt) {
-            ip::ReassemblyResult::Ready(d) => events.push(Event::Reassembled(d)),
+            ip::ReassemblyResult::Ready(d) => {
+                // cannot push both events here, since handle_ip_datagram consumes d
+                // events.push(Event::Reassembled(d));
+                self.handle_ip_datagram(events, d);
+            }
             ip::ReassemblyResult::Incomplete => events.push(Event::ReassemblyIncomplete),
             ip::ReassemblyResult::Rejected(e) => events.push(Event::ReassemblyRejected(e)),
             ip::ReassemblyResult::NotIp => events.push(Event::Error(Error::UnexpectedNotIp)),
         }
+    }
+
+    pub fn handle_ip_datagram<'a>(
+        &mut self,
+        events: &mut Vec<Event<'a>>,
+        datagram: ip::Reassembled,
+    ) {
+        events.push(match datagram.parse_transport() {
+            Ok(v) => Event::Transport(v),
+            Err(e) => Event::Error(e.into()),
+        })
     }
 }

@@ -18,7 +18,7 @@ use std::fmt;
 // at this point, we have parsed IPv4 packet: src, dst ip addresses
 // 6) decode TCP header (protocol - TCP/UDP, port number) and payload
 
-#[derive(Error, Debug, PartialEq, Eq)]
+#[derive(Error, Debug)]
 pub enum Error {
     #[error("truncated frame")]
     Truncated,
@@ -157,22 +157,10 @@ impl<'a> Parse<'a> for VlanTaggedFrame {
     }
 }
 
-pub struct HexSlice<'a>(pub &'a [u8]);
-impl fmt::Display for HexSlice<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (idx, byte) in self.0.iter().enumerate() {
-            if idx > 0 {
-                f.write_str(":")?;
-            }
-            write!(f, "{byte:02x}")?;
-        }
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::assert_matches;
 
     #[test]
     fn parse_ethernet_frame() {
@@ -193,7 +181,7 @@ mod tests {
         const TRUNCATED_FRAME: [u8; 10] =
             [0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0xAA, 0xBB, 0xCC, 0xDD];
 
-        assert_eq!(
+        assert_matches!(
             LinkFrame::parse(&TRUNCATED_FRAME).err(),
             Some(Error::Truncated)
         );

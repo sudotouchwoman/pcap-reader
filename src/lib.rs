@@ -2,11 +2,42 @@ pub mod ethernet;
 pub mod event;
 pub mod ip;
 pub mod pcap;
+pub mod transport;
+
+mod slices {
+    use std::fmt;
+
+    pub struct Utf8<'a>(pub &'a [u8]);
+
+    impl fmt::Display for Utf8<'_> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {            
+            // fallback to hex on invalid utf-8 (less readable than lossy)
+            match std::str::from_utf8(self.0) {
+                Ok(s) => f.write_str(s),
+                Err(_) => write!(f, "non-utf8: {}", Hex(self.0)), // or lossy
+            }
+
+            // lossy decode (with <?> placeholders)
+            // write!(f, "{}", String::from_utf8_lossy(self.0))?;
+        }
+    }
+
+    pub struct Hex<'a>(pub &'a [u8]);
+    impl fmt::Display for Hex<'_> {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            for (idx, byte) in self.0.iter().enumerate() {
+                if idx > 0 {
+                    f.write_str(":")?;
+                }
+                write!(f, "{byte:02x}")?;
+            }
+            Ok(())
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
-    use std::cmp::min;
-
     #[test]
     fn decode_binary_sequence() {
         const BYTES: [u8; 4] = [0x12, 0x34, 0x56, 0x78];

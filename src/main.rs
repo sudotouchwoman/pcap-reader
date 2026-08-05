@@ -39,11 +39,11 @@ fn main() {
         match pcap_reader.next_frame() {
             Ok(Some(frame)) => {
                 // process frame
-                println!("{frame_count}:{frame}:");
+                println!("PcapFrame[{frame_count}]:{frame}:");
                 frame_count += 1;
 
                 for event in decoder.push_frame(&frame.packet_data) {
-                    println!("{event}")
+                    println!("\t{event}")
                 }
             }
             Ok(None) => break,
