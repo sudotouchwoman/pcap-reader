@@ -28,6 +28,9 @@ pub enum Event<'a> {
     // transport-level events (tcp/udp segments / icmp messages)
     Transport(transport::Packet),
 
+    // tcp connection-level events (open / received data / close)
+    TcpStream(transport::StreamEvent),
+
     // link- or network-level error
     Error(Error),
 }
@@ -43,19 +46,22 @@ impl<'a> fmt::Display for Event<'a> {
             Event::ReassemblyIncomplete => write!(f, "Reassembly: incomplete"),
             Event::ReassemblyRejected(e) => write!(f, "Reassembly: rejected ({e})"),
             Event::Transport(v) => write!(f, "{v}"),
+            Event::TcpStream(v) => write!(f, "{v}"),
             Event::Error(e) => write!(f, "Error: {e}"),
         }
     }
 }
 
 pub struct Decoder {
-    reassembler: ip::NetworkReassembler,
+    ip_reassembler: ip::NetworkReassembler,
+    tcp_reassembler: transport::TcpStreamReassembler,
 }
 
 impl Decoder {
     pub fn new() -> Self {
         Self {
-            reassembler: ip::NetworkReassembler::default(),
+            ip_reassembler: ip::NetworkReassembler::default(),
+            tcp_reassembler: transport::TcpStreamReassembler::default(),
         }
     }
     pub fn push_frame<'a>(&mut self, raw: &'a [u8]) -> Vec<Event<'a>> {
@@ -87,7 +93,7 @@ impl Decoder {
     }
 
     pub fn handle_ip_packet<'a>(&mut self, events: &mut Vec<Event<'a>>, pkt: ip::IpPacket<'a>) {
-        match self.reassembler.process(&pkt) {
+        match self.ip_reassembler.process(&pkt) {
             ip::ReassemblyResult::Ready(d) => {
                 // cannot push both events here, since handle_ip_datagram consumes d
                 // events.push(Event::Reassembled(d));
@@ -104,9 +110,25 @@ impl Decoder {
         events: &mut Vec<Event<'a>>,
         datagram: ip::Reassembled,
     ) {
-        events.push(match datagram.parse_transport() {
-            Ok(v) => Event::Transport(v),
-            Err(e) => Event::Error(e.into()),
-        })
+        match datagram.parse_transport() {
+            Ok(pkt) => {
+                use crate::ip::markers::Family;
+                use crate::transport::Segment;
+
+                match &pkt {
+                    // for tcp segments: feed them into tcp reassembler and emit produced events
+                    // (single segment may emit multiple events, e.g. Open, Data, Closed)
+                    Family::Ipv4(Segment::Tcp(_)) | Family::Ipv6(Segment::Tcp(_)) => events.extend(
+                        self.tcp_reassembler
+                            .process(&pkt)
+                            .into_iter()
+                            .map(Event::TcpStream),
+                    ),
+                    // for non-tcp segments (UDP, ICMP), emit transport-level event
+                    _ => events.push(Event::Transport(pkt)),
+                };
+            }
+            Err(e) => events.push(Event::Error(e.into())),
+        }
     }
 }

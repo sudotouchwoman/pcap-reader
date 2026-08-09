@@ -40,7 +40,10 @@ mod private {
     use super::{v4, v6};
     use std::{fmt, hash};
 
-    pub trait SealedAddr: hash::Hash + Eq + Copy + Clone + fmt::Debug + fmt::Display {}
+    pub trait SealedAddr:
+        hash::Hash + PartialEq + Eq + PartialOrd + Ord + Copy + Clone + fmt::Debug + fmt::Display
+    {
+    }
 
     impl SealedAddr for v4::Addr {}
     impl SealedAddr for v6::Addr {}
@@ -275,7 +278,7 @@ pub mod v4 {
     // 32 bits, or 4 bytes
     const ADDRESS_SIZE: usize = 32 / 8;
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct Addr(pub [u8; ADDRESS_SIZE]);
 
     impl fmt::Display for Addr {
@@ -460,7 +463,7 @@ pub mod v6 {
     // 32 bits, or 4 bytes
     const ADDRESS_SIZE: usize = 128 / 8;
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
     pub struct Addr(pub [u8; ADDRESS_SIZE]);
 
     impl From<[u8; ADDRESS_SIZE]> for Addr {

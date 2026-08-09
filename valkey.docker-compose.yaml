@@ -1,0 +1,21 @@
+# since ROS2 DDS primarily uses UDP for transport, a different
+# setup is needed to inspect tcp communication. in this case, simple valkey echo
+services:
+  cache:
+    image: &image valkey/valkey:9
+
+  talker:
+    image: *image
+    depends_on:
+      - cache
+    command:
+      - /bin/sh
+      - -c
+      - |
+        i=0
+        while true; do
+          redis-cli -h cache SET "talker:$$i" "hello-$$i"
+          redis-cli -h cache GET "talker:$$i"
+          i=$$((i + 1))
+          sleep 1
+        done
