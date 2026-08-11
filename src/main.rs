@@ -7,7 +7,7 @@ use std::{
 use thiserror::Error;
 use users::{get_current_uid, get_user_by_uid};
 
-use ros_flake::{event, pcap};
+use pcap_reader::{event, pcap};
 
 fn greet(name: &str) -> String {
     format!("Greetings, {}", name)
